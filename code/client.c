@@ -13,17 +13,38 @@
 #include <fcntl.h>
 #include <signal.h>
 
+/*
+ * CONSTANTS AND SETTINGS
+ * ----------------------
+ * These define important values used throughout the program:
+ * - BUFFER_SIZE: Maximum size for data buffers (1024 bytes)
+ * - SERVER_PORT: Default FTP control port (21)
+ * - SERVER_IP: The server address (localhost)
+ * - MAXPORT: Maximum allowed port number
+ */
 #define BUFFER_SIZE 1024
 #define SERVER_PORT 21
 #define SERVER_IP "127.0.0.1"
 #define MAXPORT 65530
 
-// Global variables
+/*
+ * GLOBAL VARIABLES
+ * ---------------
+ * - control_fd: File descriptor for the main control connection to the FTP server
+ * - data_port: Port number for data transfers (file listings, uploads, downloads)
+ * - authenticated: Flag to track if the user has successfully logged in
+ */
 int control_fd;
 int data_port = 0;
 int authenticated = 0;
 
-// Function prototypes
+/*
+ * FUNCTION DECLARATIONS
+ * --------------------
+ * These declarations tell the compiler about all the functions that will be
+ * defined later in the code. Each function handles a specific part of the
+ * FTP client's operation.
+ */
 void send_command(char *command);
 void receive_response(char *response, int size);
 void handle_user_command(char *username);
@@ -39,7 +60,14 @@ void handle_stor_command(char *filename);
 void handle_quit_command();
 int setup_data_connection();
 void display_welcome_message();
+int count_arguments(char *command);
 
+/*
+ * MAIN FUNCTION
+ * ------------
+ * This is where the program begins execution. It creates a connection to
+ * the FTP server and enters a loop to process user commands.
+ */
 int main() {
     struct sockaddr_in server_addr;
     
@@ -70,7 +98,12 @@ int main() {
     receive_response(response, BUFFER_SIZE);
     printf("%s\n", response);
     
-    // Main command loop
+    /*
+     * MAIN COMMAND LOOP
+     * ----------------
+     * This continuous loop accepts user input, parses commands, and calls
+     * the appropriate handler functions until the user enters the QUIT command.
+     */
     char command[BUFFER_SIZE];
     while (1) {
         printf("ftp> ");
@@ -88,44 +121,129 @@ int main() {
         }
         
         // Extract command and argument
-        char cmd[BUFFER_SIZE];
-        char arg[BUFFER_SIZE];
+        char cmd[BUFFER_SIZE] = "";
+        char arg[BUFFER_SIZE] = "";
         
         if (sscanf(command, "%s %s", cmd, arg) < 1) {
             continue;
         }
-        // Handle commands
+
+        // Check for extra parameters
+        int arg_count = count_arguments(command);
+        
+        /*
+         * COMMAND PROCESSING
+         * -----------------
+         * This section checks which command the user entered and calls 
+         * the appropriate handler function after validating the arguments.
+         * Each command has specific requirements for the number of arguments.
+         */
         if (strcmp(cmd, "USER") == 0) {
-            handle_user_command(arg);
+            if (arg_count != 2) {
+                printf("Usage: USER <username>\n");
+            } else {
+                handle_user_command(arg);
+            }
         } else if (strcmp(cmd, "PASS") == 0) {
-            handle_pass_command(arg);
+            if (arg_count != 2) {
+                printf("Usage: PASS <password>\n");
+            } else {
+                handle_pass_command(arg);
+            }
         } else if (strcmp(cmd, "LIST") == 0) {
-            handle_list_command();
+            if (arg_count != 1) {
+                printf("Usage: LIST\n");
+            } else {
+                handle_list_command();
+            }
         } else if (strcmp(cmd, "!LIST") == 0) {
-            handle_local_list_command();
+            if (arg_count != 1) {
+                printf("Usage: !LIST\n");
+            } else {
+                handle_local_list_command();
+            }
         } else if (strcmp(cmd, "CWD") == 0) {
-            handle_cwd_command(arg);
+            if (arg_count != 2) {
+                printf("Usage: CWD <directory>\n");
+            } else {
+                handle_cwd_command(arg);
+            }
         } else if (strcmp(cmd, "!CWD") == 0) {
-            handle_local_cwd_command(arg);
+            if (arg_count != 2) {
+                printf("Usage: !CWD <directory>\n");
+            } else {
+                handle_local_cwd_command(arg);
+            }
         } else if (strcmp(cmd, "PWD") == 0) {
-            handle_pwd_command();
+            if (arg_count != 1) {
+                printf("Usage: PWD\n");
+            } else {
+                handle_pwd_command();
+            }
         } else if (strcmp(cmd, "!PWD") == 0) {
-            handle_local_pwd_command();
+            if (arg_count != 1) {
+                printf("Usage: !PWD\n");
+            } else {
+                handle_local_pwd_command();
+            }
         } else if (strcmp(cmd, "RETR") == 0) {
-            handle_retr_command(arg);
+            if (arg_count != 2) {
+                printf("Usage: RETR <filename>\n");
+            } else {
+                handle_retr_command(arg);
+            }
         } else if (strcmp(cmd, "STOR") == 0) {
-            handle_stor_command(arg);
+            if (arg_count != 2) {
+                printf("Usage: STOR <filename>\n");
+            } else {
+                handle_stor_command(arg);
+            }
         } else if (strcmp(cmd, "QUIT") == 0) {
-            handle_quit_command();
-            break;
+            if (arg_count != 1) {
+                printf("Usage: QUIT\n");
+            } else {
+                handle_quit_command();
+                break;
+            }
         } else {
             printf("Unknown command: %s\n", cmd);
+            printf("Available commands: USER, PASS, LIST, !LIST, CWD, !CWD, PWD, !PWD, RETR, STOR, QUIT\n");
         }
     }
     
     return 0;
 }
 
+/*
+ * ARGUMENT COUNTING FUNCTION
+ * ------------------------
+ * This function counts how many space-separated words are in a command,
+ * which helps validate that commands have the correct number of arguments.
+ */
+int count_arguments(char *command) {
+    int count = 0;
+    char *token;
+    char temp[BUFFER_SIZE];
+    
+    // Create a copy of the command to avoid modifying the original
+    strncpy(temp, command, BUFFER_SIZE);
+    
+    // Count tokens (space-separated words)
+    token = strtok(temp, " \t");
+    while (token != NULL) {
+        count++;
+        token = strtok(NULL, " \t");
+    }
+    
+    return count;
+}
+
+/*
+ * WELCOME MESSAGE FUNCTION
+ * ---------------------
+ * This function displays instructions for the user when the program starts,
+ * explaining how to log in and what commands are available.
+ */
 void display_welcome_message() {
     printf("Hello!! Please Authenticate\n");
     printf("1. type \"USER\" followed by a space and your username\n");
@@ -140,6 +258,13 @@ void display_welcome_message() {
     printf("Add \"!\" before the last three commands to apply them locally\n");
 }
 
+/*
+ * SERVER COMMUNICATION FUNCTIONS
+ * ---------------------------
+ * These two functions handle the basic communication with the FTP server:
+ * - send_command: Sends a formatted command to the server
+ * - receive_response: Reads and processes the server's response
+ */
 void send_command(char *command) {
     char full_command[BUFFER_SIZE];
     sprintf(full_command, "%s\r\n", command);
@@ -149,13 +274,26 @@ void send_command(char *command) {
 void receive_response(char *response, int size) {
     memset(response, 0, size);
     int bytes_read = read(control_fd, response, size - 1);
-    if(bytes_read>0){
-        response[bytes_read]='\0';
+    if(bytes_read > 0) {
+        response[bytes_read] = '\0';
         // Remove trailing newline
         response[strcspn(response, "\r\n")] = '\0';
     }
 }
 
+/*
+ * DATA CONNECTION SETUP
+ * -------------------
+ * This function creates a data connection for transferring files or directory listings.
+ * In FTP, there are two connections:
+ * 1. Control connection (established in main) for sending commands
+ * 2. Data connection (created here) for transferring actual files/data
+ *
+ * This function:
+ * - Creates a new socket
+ * - Binds it to a random available port
+ * - Tells the FTP server which port to connect to using the PORT command
+ */
 int setup_data_connection() {
     struct sockaddr_in data_addr;
     socklen_t addr_len = sizeof(data_addr);
@@ -217,6 +355,13 @@ int setup_data_connection() {
     return data_listen_fd;
 }
 
+/*
+ * AUTHENTICATION HANDLERS
+ * ---------------------
+ * These functions manage the login process:
+ * - handle_user_command: Sends the username to the server
+ * - handle_pass_command: Sends the password and updates authentication status
+ */
 void handle_user_command(char *username) {
     char command[BUFFER_SIZE];
     sprintf(command, "USER %s", username);
@@ -241,6 +386,13 @@ void handle_pass_command(char *password) {
     }
 }
 
+/*
+ * LIST COMMAND HANDLERS
+ * -------------------
+ * These functions show directory contents:
+ * - handle_list_command: Shows files on the server
+ * - handle_local_list_command: Shows files on the local computer
+ */
 void handle_list_command() {
     if (!authenticated) {
         printf("Not authenticated. Please login first.\n");
@@ -256,11 +408,11 @@ void handle_list_command() {
     send_command("LIST");
     
     // get response.
-    char response2[BUFFER_SIZE];
-    receive_response(response2, BUFFER_SIZE);
-    printf("%s\n", response2);
+    char response[BUFFER_SIZE];
+    receive_response(response, BUFFER_SIZE);
+    printf("%s\n", response);
 
-    if (strncmp(response2, "530", 3) == 0 || response2[0] == '5') {
+    if (strncmp(response, "530", 3) == 0 || response[0] == '5') {
         //the command wasn't successful present the ftp> prompt to the user again
         close(data_fd);
         return;  
@@ -270,8 +422,8 @@ void handle_list_command() {
     struct sockaddr_in server_data_addr;
     socklen_t server_addr_len = sizeof(server_data_addr);
     
-    int conection_fd = accept(data_fd, (struct sockaddr *)&server_data_addr, &server_addr_len);
-    if (conection_fd < 0) {
+    int connection_fd = accept(data_fd, (struct sockaddr *)&server_data_addr, &server_addr_len);
+    if (connection_fd < 0) {
         perror("Data accept failed");
         close(data_fd);
         return;
@@ -280,7 +432,7 @@ void handle_list_command() {
     char buffer[BUFFER_SIZE];
     ssize_t bytes_read;
     
-    while ((bytes_read = read(conection_fd, buffer, BUFFER_SIZE - 1)) > 0) {
+    while ((bytes_read = read(connection_fd, buffer, BUFFER_SIZE - 1)) > 0) {
         buffer[bytes_read] = '\0';
         printf("%s", buffer);
     }
@@ -289,14 +441,13 @@ void handle_list_command() {
     }
     
     // Close data connection
-    close(conection_fd);
+    close(connection_fd);
     close(data_fd);
     
-    // Now read the responses - both the "150" and "226" messages
-    char response[BUFFER_SIZE];
-    receive_response(response, BUFFER_SIZE);
-    printf("%s\n", response);
-    return;
+    // Read the final status response ("226" message)
+    char final_response[BUFFER_SIZE];
+    receive_response(final_response, BUFFER_SIZE);
+    printf("%s\n", final_response);
 }
 
 void handle_local_list_command() {
@@ -304,6 +455,15 @@ void handle_local_list_command() {
     system("ls");
 }
 
+/*
+ * DIRECTORY NAVIGATION HANDLERS
+ * --------------------------
+ * These functions help change or show the current directory:
+ * - handle_cwd_command: Changes directory on the server
+ * - handle_local_cwd_command: Changes directory on the local computer
+ * - handle_pwd_command: Shows current directory on the server
+ * - handle_local_pwd_command: Shows current directory on the local computer
+ */
 void handle_cwd_command(char *dir) {
     if (!authenticated) {
         printf("Not authenticated. Please login first.\n");
@@ -322,6 +482,8 @@ void handle_cwd_command(char *dir) {
 void handle_local_cwd_command(char *dir) {
     if (chdir(dir) != 0) {
         perror("Local CWD failed");
+    } else {
+        printf("Local directory changed to %s\n", dir);
     }
 }
 
@@ -347,6 +509,20 @@ void handle_local_pwd_command() {
     }
 }
 
+/*
+ * FILE TRANSFER HANDLERS
+ * --------------------
+ * These functions manage downloading and uploading files:
+ * - handle_retr_command: Downloads a file from the server
+ * - handle_stor_command: Uploads a file to the server
+ *
+ * Both functions work by:
+ * 1. Setting up a data connection
+ * 2. Sending the appropriate command (RETR or STOR)
+ * 3. Opening the local file (for reading or writing)
+ * 4. Transferring data between the file and the data connection
+ * 5. Closing all connections and files
+ */
 void handle_retr_command(char *filename) {
     if (!authenticated) {
         printf("Not authenticated. Please login first.\n");
@@ -378,15 +554,15 @@ void handle_retr_command(char *filename) {
             return;
         }
         
-
         //Accept data connections
         struct sockaddr_in server_data_addr;
         socklen_t server_addr_len = sizeof(server_data_addr);
         
-        int conection_fd = accept(data_fd, (struct sockaddr *)&server_data_addr, &server_addr_len);
-        if (conection_fd < 0) {
+        int connection_fd = accept(data_fd, (struct sockaddr *)&server_data_addr, &server_addr_len);
+        if (connection_fd < 0) {
             perror("Data accept failed");
             close(data_fd);
+            fclose(fp);
             return;
         }
 
@@ -394,24 +570,25 @@ void handle_retr_command(char *filename) {
         ssize_t bytes_read;
 
         // Receive file
-        while ((bytes_read = read(conection_fd, buffer, BUFFER_SIZE)) > 0) {
+        while ((bytes_read = read(connection_fd, buffer, BUFFER_SIZE)) > 0) {
             fwrite(buffer, 1, bytes_read, fp);
         }
         if (bytes_read < 0) {
-            fprintf(stderr, "Error receiving directory listing: %s\n", strerror(errno));
+            fprintf(stderr, "Error receiving file: %s\n", strerror(errno));
         }
         
         fclose(fp);
         
         // Close data connection
-        close(conection_fd);
+        close(connection_fd);
         close(data_fd);
         
         // Receive final response
-        char fresponse[BUFFER_SIZE];
-        receive_response(fresponse, BUFFER_SIZE);
-        printf("%s\n", fresponse);
-        return;
+        char final_response[BUFFER_SIZE];
+        receive_response(final_response, BUFFER_SIZE);
+        printf("%s\n", final_response);
+    } else {
+        close(data_fd);
     }
 }
 
@@ -454,15 +631,15 @@ void handle_stor_command(char *filename) {
             return;
         }
         
-
         //Accept data connections
         struct sockaddr_in server_data_addr;
         socklen_t server_addr_len = sizeof(server_data_addr);
         
-        int conection_fd = accept(data_fd, (struct sockaddr *)&server_data_addr, &server_addr_len);
-        if (conection_fd < 0) {
+        int connection_fd = accept(data_fd, (struct sockaddr *)&server_data_addr, &server_addr_len);
+        if (connection_fd < 0) {
             perror("Data accept failed");
             close(data_fd);
+            fclose(fp);
             return;
         }
 
@@ -471,26 +648,30 @@ void handle_stor_command(char *filename) {
         size_t bytes_read;
         
         while ((bytes_read = fread(buffer, 1, BUFFER_SIZE, fp)) > 0) {
-            write(conection_fd, buffer, bytes_read);
+            write(connection_fd, buffer, bytes_read);
         }
-        if (bytes_read < 0) {
-            fprintf(stderr, "Error receiving directory listing: %s\n", strerror(errno));
-        }
-
+        
         fclose(fp);
         
         // Close data connection
-        close(conection_fd);
+        close(connection_fd);
         close(data_fd);
         
         // Receive final response
-        char fresponse[BUFFER_SIZE];
-        receive_response(fresponse, BUFFER_SIZE);
-        printf("%s\n", fresponse);
-        return;
+        char final_response[BUFFER_SIZE];
+        receive_response(final_response, BUFFER_SIZE);
+        printf("%s\n", final_response);
+    } else {
+        close(data_fd);
     }
 }
 
+/*
+ * QUIT COMMAND HANDLER
+ * -----------------
+ * This function cleanly terminates the connection to the FTP server
+ * by sending the QUIT command and closing the control connection.
+ */
 void handle_quit_command() {
     send_command("QUIT");
     
