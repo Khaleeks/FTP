@@ -16,6 +16,7 @@
 #define BUFFER_SIZE 1024
 #define SERVER_PORT 21
 #define SERVER_IP "127.0.0.1"
+#define MAXPORT 65530
 
 // Global variables
 int control_fd;
@@ -93,7 +94,6 @@ int main() {
         if (sscanf(command, "%s %s", cmd, arg) < 1) {
             continue;
         }
-        
         // Handle commands
         if (strcmp(cmd, "USER") == 0) {
             handle_user_command(arg);
@@ -148,10 +148,12 @@ void send_command(char *command) {
 
 void receive_response(char *response, int size) {
     memset(response, 0, size);
-    read(control_fd, response, size - 1);
-    
-    // Remove trailing newline
-    response[strcspn(response, "\r\n")] = '\0';
+    int bytes_read = read(control_fd, response, size - 1);
+    if(bytes_read>0){
+        response[bytes_read]='\0';
+        // Remove trailing newline
+        response[strcspn(response, "\r\n")] = '\0';
+    }
 }
 
 int setup_data_connection() {
@@ -164,6 +166,12 @@ int setup_data_connection() {
         perror("Data socket creation failed");
         return -1;
     }
+    // Initialize data address
+    memset(&data_addr, 0, sizeof(data_addr));
+    data_addr.sin_family = AF_INET;
+    data_addr.sin_addr.s_addr = INADDR_ANY;
+    data_addr.sin_port = 0;  // Let the system assign a port
+    
     
     // Set socket option to reuse address
     int opt = 1;
@@ -172,12 +180,6 @@ int setup_data_connection() {
         close(data_listen_fd);
         return -1;
     }
-    
-    // Initialize data address
-    memset(&data_addr, 0, sizeof(data_addr));
-    data_addr.sin_family = AF_INET;
-    data_addr.sin_addr.s_addr = INADDR_ANY;
-    data_addr.sin_port = 0;  // Let the system assign a port
     
     // Bind data socket
     if (bind(data_listen_fd, (struct sockaddr *)&data_addr, sizeof(data_addr)) < 0) {
@@ -192,9 +194,8 @@ int setup_data_connection() {
         close(data_listen_fd);
         return -1;
     }
-    
-    data_port = ntohs(data_addr.sin_port);
-    
+
+    data_port = ntohs(data_addr.sin_port);    
     // Listen for connections
     if (listen(data_listen_fd, 1) < 0) {
         perror("Data listen failed");
@@ -212,22 +213,8 @@ int setup_data_connection() {
     receive_response(response, BUFFER_SIZE);
     printf("%s\n", response);
     
-    // Wait for server to connect
-    struct sockaddr_in server_data_addr;
-    socklen_t server_addr_len = sizeof(server_data_addr);
-    
-    int data_fd = accept(data_listen_fd, (struct sockaddr *)&server_data_addr, &server_addr_len);
-    if (data_fd < 0) {
-        perror("Data accept failed");
-        close(data_listen_fd);
-        return -1;
-    }
-    
-    // Close listen socket
-    close(data_listen_fd);
-    
     // Return data socket
-    return data_fd;
+    return data_listen_fd;
 }
 
 void handle_user_command(char *username) {
@@ -265,29 +252,51 @@ void handle_list_command() {
     if (data_fd < 0) {
         return;
     }
-    
     // Send LIST command
     send_command("LIST");
     
-    // Wait for the incoming connection and process the data first
+    // get response.
+    char response2[BUFFER_SIZE];
+    receive_response(response2, BUFFER_SIZE);
+    printf("%s\n", response2);
+
+    if (strncmp(response2, "530", 3) == 0 || response2[0] == '5') {
+        //the command wasn't successful present the ftp> prompt to the user again
+        close(data_fd);
+        return;  
+    }
+
+    //Accept data connections
+    struct sockaddr_in server_data_addr;
+    socklen_t server_addr_len = sizeof(server_data_addr);
+    
+    int conection_fd = accept(data_fd, (struct sockaddr *)&server_data_addr, &server_addr_len);
+    if (conection_fd < 0) {
+        perror("Data accept failed");
+        close(data_fd);
+        return;
+    }
+
     char buffer[BUFFER_SIZE];
     ssize_t bytes_read;
     
-    while ((bytes_read = read(data_fd, buffer, BUFFER_SIZE - 1)) > 0) {
+    while ((bytes_read = read(conection_fd, buffer, BUFFER_SIZE - 1)) > 0) {
         buffer[bytes_read] = '\0';
         printf("%s", buffer);
     }
+    if (bytes_read < 0) {
+        fprintf(stderr, "Error receiving directory listing: %s\n", strerror(errno));
+    }
     
     // Close data connection
+    close(conection_fd);
     close(data_fd);
     
     // Now read the responses - both the "150" and "226" messages
     char response[BUFFER_SIZE];
     receive_response(response, BUFFER_SIZE);
     printf("%s\n", response);
-    
-    receive_response(response, BUFFER_SIZE);
-    printf("%s\n", response);
+    return;
 }
 
 void handle_local_list_command() {
@@ -369,22 +378,40 @@ void handle_retr_command(char *filename) {
             return;
         }
         
-        // Receive file
+
+        //Accept data connections
+        struct sockaddr_in server_data_addr;
+        socklen_t server_addr_len = sizeof(server_data_addr);
+        
+        int conection_fd = accept(data_fd, (struct sockaddr *)&server_data_addr, &server_addr_len);
+        if (conection_fd < 0) {
+            perror("Data accept failed");
+            close(data_fd);
+            return;
+        }
+
         char buffer[BUFFER_SIZE];
         ssize_t bytes_read;
-        
-        while ((bytes_read = read(data_fd, buffer, BUFFER_SIZE)) > 0) {
+
+        // Receive file
+        while ((bytes_read = read(conection_fd, buffer, BUFFER_SIZE)) > 0) {
             fwrite(buffer, 1, bytes_read, fp);
+        }
+        if (bytes_read < 0) {
+            fprintf(stderr, "Error receiving directory listing: %s\n", strerror(errno));
         }
         
         fclose(fp);
         
         // Close data connection
+        close(conection_fd);
         close(data_fd);
         
         // Receive final response
-        receive_response(response, BUFFER_SIZE);
-        printf("%s\n", response);
+        char fresponse[BUFFER_SIZE];
+        receive_response(fresponse, BUFFER_SIZE);
+        printf("%s\n", fresponse);
+        return;
     }
 }
 
@@ -427,22 +454,40 @@ void handle_stor_command(char *filename) {
             return;
         }
         
+
+        //Accept data connections
+        struct sockaddr_in server_data_addr;
+        socklen_t server_addr_len = sizeof(server_data_addr);
+        
+        int conection_fd = accept(data_fd, (struct sockaddr *)&server_data_addr, &server_addr_len);
+        if (conection_fd < 0) {
+            perror("Data accept failed");
+            close(data_fd);
+            return;
+        }
+
         // Send file
         char buffer[BUFFER_SIZE];
         size_t bytes_read;
         
         while ((bytes_read = fread(buffer, 1, BUFFER_SIZE, fp)) > 0) {
-            write(data_fd, buffer, bytes_read);
+            write(conection_fd, buffer, bytes_read);
         }
-        
+        if (bytes_read < 0) {
+            fprintf(stderr, "Error receiving directory listing: %s\n", strerror(errno));
+        }
+
         fclose(fp);
         
         // Close data connection
+        close(conection_fd);
         close(data_fd);
         
         // Receive final response
-        receive_response(response, BUFFER_SIZE);
-        printf("%s\n", response);
+        char fresponse[BUFFER_SIZE];
+        receive_response(fresponse, BUFFER_SIZE);
+        printf("%s\n", fresponse);
+        return;
     }
 }
 

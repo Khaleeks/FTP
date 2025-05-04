@@ -8,11 +8,20 @@ SERVER_OUT = server/server
 
 all: client server
 
-client: $(CLIENT_SRC)
+# Ensure client directory exists before building
+client: | client_dir
 	$(CC) $(CFLAGS) -o $(CLIENT_OUT) $(CLIENT_SRC)
 
-server: $(SERVER_SRC)
+# Ensure server directory exists before building
+server: | server_dir
 	$(CC) $(CFLAGS) -o $(SERVER_OUT) $(SERVER_SRC)
+
+# Directory creation rules
+client_dir:
+	mkdir -p client
+
+server_dir:
+	mkdir -p server
 
 clean:
 	rm -f $(CLIENT_OUT) $(SERVER_OUT)
@@ -32,4 +41,4 @@ rebuild: clean all
 deps:
 	@echo "No external dependencies required."
 
-.PHONY: all client server clean run-client run-server rebuild deps
+.PHONY: all client server clean run-client run-server rebuild deps client_dir server_dir

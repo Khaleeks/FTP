@@ -323,16 +323,6 @@ void handle_command(int client_fd, char *command) {
         handle_retr_command(client_fd, arg);
     } else if (strcmp(cmd, "STOR") == 0) {
         handle_stor_command(client_fd, arg);
-    } else if (strcmp(cmd, "MKD") == 0) {
-        handle_mkd_command(client_fd, arg);
-    } else if (strcmp(cmd, "RMD") == 0) {
-        handle_rmd_command(client_fd, arg);
-    } else if (strcmp(cmd, "DELE") == 0) {
-        handle_dele_command(client_fd, arg);
-    } else if (strcmp(cmd, "RNFR") == 0) {
-        handle_rnfr_command(client_fd, arg);
-    } else if (strcmp(cmd, "RNTO") == 0) {
-        handle_rnto_command(client_fd, arg);
     } else {
         send_response(client_fd, "202 Command not implemented.");
     }
@@ -390,13 +380,11 @@ void handle_pass_command(int client_fd, char *password) {
 
 void handle_quit_command(int client_fd) {
     send_response(client_fd, "221 Service closing control connection.");
-    
     int session_index = get_session_index(client_fd);
     if (session_index != -1) {
         clean_up_session(session_index);
     }
-    
-    close(client_fd);
+    // Do not close(client_fd) here; let the main loop handle it
 }
 
 void handle_port_command(int client_fd, char *port_args) {
@@ -452,7 +440,26 @@ void handle_list_command(int client_fd) {
         send_response(client_fd, "425 Can't open data connection.");
         return;
     }
-    
+
+    // Bind to port 20 for RFC 959 compliance
+    struct sockaddr_in server_data_addr;
+    memset(&server_data_addr, 0, sizeof(server_data_addr));
+    server_data_addr.sin_family = AF_INET;
+    server_data_addr.sin_addr.s_addr = INADDR_ANY;
+    server_data_addr.sin_port = htons(20);
+    if (bind(data_fd, (struct sockaddr *)&server_data_addr, sizeof(server_data_addr)) < 0) {
+        perror("Bind to port 20 failed");
+        close(data_fd);
+        send_response(client_fd, "425 Can't open data connection (bind 20).");
+        return;
+    }
+    // Print the port the server is sending from
+    struct sockaddr_in actual_addr;
+    socklen_t actual_addr_len = sizeof(actual_addr);
+    if (getsockname(data_fd, (struct sockaddr *)&actual_addr, &actual_addr_len) == 0) {
+        printf("[DEBUG] Server data port (source port) for this transfer: %d\n", ntohs(actual_addr.sin_port));
+    }
+
     // Initialize client data address
     struct sockaddr_in client_data_addr;
     memset(&client_data_addr, 0, sizeof(client_data_addr));
@@ -491,16 +498,18 @@ void handle_list_command(int client_fd) {
         // List directory contents
         DIR *dir;
         struct dirent *ent;
+        printf("We are in child process\n");
         
         if ((dir = opendir(client_sessions[session_index].current_dir)) != NULL) {
             while ((ent = readdir(dir)) != NULL) {
                 // Skip . and ..
-                if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
+                if (ent->d_name[0]=='.') {
                     continue;
                 }
                 
                 char file_info[BUFFER_SIZE];
                 sprintf(file_info, "%s\r\n", ent->d_name);
+                printf("%s",file_info);
                 write(data_fd, file_info, strlen(file_info));
             }
             closedir(dir);
@@ -531,42 +540,59 @@ void handle_cwd_command(int client_fd, char *dir) {
         send_response(client_fd, "500 Internal server error.");
         return;
     }
-    
-    char new_dir[BUFFER_SIZE];
-    
-    // Check if directory is absolute or relative
+
+    char target_path[PATH_MAX];
+
+    // Check if dir is absolute or relative
     if (dir[0] == '/') {
-        sprintf(new_dir, "%s", dir);
+        snprintf(target_path, sizeof(target_path), "%s", dir);
     } else {
-        sprintf(new_dir, "%s/%s", client_sessions[session_index].current_dir, dir);
+        snprintf(target_path, sizeof(target_path), "%s/%s", client_sessions[session_index].current_dir, dir);
     }
-    
-    // Check if directory exists
-    DIR *dir_ptr = opendir(new_dir);
-    if (dir_ptr) {
-        closedir(dir_ptr);
-        sprintf(client_sessions[session_index].current_dir, "%s", new_dir);
-        
-        printf("Changing directory to: %s\n", dir);
-        
-        // Format response
-        char response[BUFFER_SIZE];
-        // Get relative path from root to current directory
-        char rel_path[BUFFER_SIZE];
-        strcpy(rel_path, client_sessions[session_index].current_dir);
-        
-        // Remove root_dir from path to get relative path
-        char *username_pos = strstr(rel_path, client_sessions[session_index].username);
-        if (username_pos) {
-            sprintf(response, "200 directory changed to %s/.", username_pos);
-        } else {
-            sprintf(response, "200 directory changed to %s/.", rel_path);
-        }
-        
-        send_response(client_fd, response);
-    } else {
+
+    // Normalize path to resolve ".." and "."
+    char resolved_path[PATH_MAX];
+    if (realpath(target_path, resolved_path) == NULL) {
         send_response(client_fd, "550 No such file or directory.");
+        return;
     }
+
+    // Check if resolved path stays within user's root directory
+    char *user_root = strstr(client_sessions[session_index].current_dir, client_sessions[session_index].username);
+    if (!user_root) {
+        send_response(client_fd, "500 Internal server error.");
+        return;
+    }
+
+    // Build the full root prefix path
+    char allowed_root[PATH_MAX];
+    if (realpath(client_sessions[session_index].username, allowed_root) == NULL) {
+        perror("realpath");
+        send_response(client_fd, "550 Invalid root directory.");
+        return;
+    }
+
+    size_t len = strlen(allowed_root);
+    if (strncmp(resolved_path, allowed_root, len) != 0 || 
+        (resolved_path[len] != '/' && resolved_path[len] != '\0')) {
+        send_response(client_fd, "550 Permission denied.");
+        return;
+    }
+
+    // Update session path
+    snprintf(client_sessions[session_index].current_dir, sizeof(client_sessions[session_index].current_dir), "%s", resolved_path);
+    printf("Changing directory to: %s\n", resolved_path);
+
+    // Send relative path in response
+    char *rel_path = strstr(resolved_path, client_sessions[session_index].username);
+    char response[BUFFER_SIZE];
+    if (rel_path) {
+        snprintf(response, sizeof(response), "200 directory changed to /%s", rel_path);
+    } else {
+        snprintf(response, sizeof(response), "200 directory changed to %s", resolved_path);
+    }
+
+    send_response(client_fd, response);
 }
 
 void handle_pwd_command(int client_fd) {
@@ -622,6 +648,25 @@ void handle_retr_command(int client_fd, char *filename) {
         close(data_fd);
         send_response(client_fd, "425 Can't open data connection.");
         return;
+    }
+    
+    // Bind to port 20 for RFC 959 compliance
+    struct sockaddr_in server_data_addr;
+    memset(&server_data_addr, 0, sizeof(server_data_addr));
+    server_data_addr.sin_family = AF_INET;
+    server_data_addr.sin_addr.s_addr = INADDR_ANY;
+    server_data_addr.sin_port = htons(20);
+    if (bind(data_fd, (struct sockaddr *)&server_data_addr, sizeof(server_data_addr)) < 0) {
+        perror("Bind to port 20 failed");
+        close(data_fd);
+        send_response(client_fd, "425 Can't open data connection (bind 20).");
+        return;
+    }
+    // Print the port the server is sending from
+    struct sockaddr_in actual_addr;
+    socklen_t actual_addr_len = sizeof(actual_addr);
+    if (getsockname(data_fd, (struct sockaddr *)&actual_addr, &actual_addr_len) == 0) {
+        printf("[DEBUG] Server data port (source port) for this transfer: %d\n", ntohs(actual_addr.sin_port));
     }
     
     // Check if file exists
@@ -733,6 +778,25 @@ void handle_stor_command(int client_fd, char *filename) {
         close(data_fd);
         send_response(client_fd, "425 Can't open data connection.");
         return;
+    }
+    
+    // Bind to port 20 for RFC 959 compliance
+    struct sockaddr_in server_data_addr;
+    memset(&server_data_addr, 0, sizeof(server_data_addr));
+    server_data_addr.sin_family = AF_INET;
+    server_data_addr.sin_addr.s_addr = INADDR_ANY;
+    server_data_addr.sin_port = htons(20);
+    if (bind(data_fd, (struct sockaddr *)&server_data_addr, sizeof(server_data_addr)) < 0) {
+        perror("Bind to port 20 failed");
+        close(data_fd);
+        send_response(client_fd, "425 Can't open data connection (bind 20).");
+        return;
+    }
+    // Print the port the server is sending from
+    struct sockaddr_in actual_addr;
+    socklen_t actual_addr_len = sizeof(actual_addr);
+    if (getsockname(data_fd, (struct sockaddr *)&actual_addr, &actual_addr_len) == 0) {
+        printf("[DEBUG] Server data port (source port) for this transfer: %d\n", ntohs(actual_addr.sin_port));
     }
     
     // Create temporary filepath
