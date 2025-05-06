@@ -138,11 +138,6 @@
  void handle_pwd_command(int client_fd);
  void handle_retr_command(int client_fd, char *filename);
  void handle_stor_command(int client_fd, char *filename);
- void handle_mkd_command(int client_fd, char *dirname);
- void handle_rmd_command(int client_fd, char *dirname);
- void handle_dele_command(int client_fd, char *filename);
- void handle_rnfr_command(int client_fd, char *oldname);
- void handle_rnto_command(int client_fd, char *newname);
  int get_session_index(int client_fd);
  void clean_up_session(int session_index);
  void handle_child_process(int sig);
@@ -1095,19 +1090,19 @@ void handle_retr_command(int client_fd, char *filename) {
  * provides efficient transfer of variable-sized files.
  */
 void handle_stor_command(int client_fd, char *filename) {
-    int session_index = get_session_index(client_fd);
+    int session_index = get_session_index(client_fd); // Find the session for this client
     
     if (session_index == -1 || client_sessions[session_index].data_port == -1) {
-        send_response(client_fd, "425 Can't open data connection.");
+        send_response(client_fd, "425 Can't open data connection."); // No data connection info
         return;
     }
     
-    // Get client IP and port
+    // Get client IP and port for data connection
     char client_ip[50];
     strcpy(client_ip, client_sessions[session_index].data_ip);
     int client_port = client_sessions[session_index].data_port;
     
-    // Create data socket
+    // Create a new socket for the data connection
     int data_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (data_fd < 0) {
         perror("Socket creation failed");
@@ -1115,7 +1110,7 @@ void handle_stor_command(int client_fd, char *filename) {
         return;
     }
     
-    // Set socket option to reuse address
+    // Allow address reuse for the data socket
     int opt = 1;
     if (setsockopt(data_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
         perror("Setsockopt failed");
@@ -1124,7 +1119,7 @@ void handle_stor_command(int client_fd, char *filename) {
         return;
     }
     
-    // Bind to port 20 for RFC 959 compliance
+    // Bind the data socket to port 20 (FTP active mode requirement)
     struct sockaddr_in server_data_addr;
     memset(&server_data_addr, 0, sizeof(server_data_addr));
     server_data_addr.sin_family = AF_INET;
@@ -1136,33 +1131,31 @@ void handle_stor_command(int client_fd, char *filename) {
         send_response(client_fd, "425 Can't open data connection (bind 20).");
         return;
     }
-    // Print the port the server is sending from
+    // Print the port the server is sending from (debug)
     struct sockaddr_in actual_addr;
     socklen_t actual_addr_len = sizeof(actual_addr);
     if (getsockname(data_fd, (struct sockaddr *)&actual_addr, &actual_addr_len) == 0) {
         printf("[DEBUG] Server data port (source port) for this transfer: %d\n", ntohs(actual_addr.sin_port));
     }
     
-    // Create temporary filepath
+    // Prepare temporary and final file paths for upload
     char temp_filepath[BUFFER_SIZE];
     sprintf(temp_filepath, "%s/tmp_%ld_%s", client_sessions[session_index].current_dir, (long)time(NULL), filename);
-    
-    // Create final filepath
     char final_filepath[BUFFER_SIZE];
     sprintf(final_filepath, "%s/%s", client_sessions[session_index].current_dir, filename);
     
-    // Initialize client data address
+    // Set up the client's data address for the connection
     struct sockaddr_in client_data_addr;
     memset(&client_data_addr, 0, sizeof(client_data_addr));
     client_data_addr.sin_family = AF_INET;
     client_data_addr.sin_addr.s_addr = inet_addr(client_ip);
     client_data_addr.sin_port = htons(client_port);
     
-    send_response(client_fd, "150 File status okay; about to open data connection.");
+    send_response(client_fd, "150 File status okay; about to open data connection."); // Ready to receive file
     printf("File okay, beginning data connections\n");
     printf("Connecting to Client Transfer Socket...\n");
     
-    // Connect to client data port
+    // Connect to the client's data port
     if (connect(data_fd, (struct sockaddr *)&client_data_addr, sizeof(client_data_addr)) < 0) {
         perror("Connect failed");
         close(data_fd);
@@ -1172,7 +1165,7 @@ void handle_stor_command(int client_fd, char *filename) {
     
     printf("Connection Successful\n");
     
-    // Fork to handle data transfer
+    // Fork a child process to handle the file transfer
     pid_t pid = fork();
     if (pid < 0) {
         perror("Fork failed");
@@ -1182,274 +1175,33 @@ void handle_stor_command(int client_fd, char *filename) {
     }
     
     if (pid == 0) {
-        // Child process
-        close(client_fd);
-        
-        // Open temporary file for writing
-        FILE *fp = fopen(temp_filepath, "wb");
+        // Child process: receives the file and writes to a temporary file
+        close(client_fd); // Child doesn't need the control connection
+        FILE *fp = fopen(temp_filepath, "wb"); // Open temp file for writing (binary mode)
         if (fp == NULL) {
             close(data_fd);
             exit(1);
         }
-        
-        // Receive file
         char buffer[BUFFER_SIZE];
         ssize_t bytes_read;
-        
+        // Read from data connection and write to file
         while ((bytes_read = read(data_fd, buffer, BUFFER_SIZE)) > 0) {
             fwrite(buffer, 1, bytes_read, fp);
         }
-        
-        fclose(fp);
-        close(data_fd);
-        
-        // Rename temporary file to final filename
+        fclose(fp); // Close file
+        close(data_fd); // Close data connection
+        // Rename temp file to final filename (atomic move)
         rename(temp_filepath, final_filepath);
-        
-        exit(0);
+        exit(0); // Child exits
     } else {
-        // Parent process
-        close(data_fd);
-        
-        // Reset data connection info
+        // Parent process: cleans up and sends completion response
+        close(data_fd); // Parent closes its copy of the data socket
+        // Reset data connection info for this session
         client_sessions[session_index].data_port = -1;
         memset(client_sessions[session_index].data_ip, 0, sizeof(client_sessions[session_index].data_ip));
-        
         // Wait for child to finish
         waitpid(pid, NULL, 0);
-        
         printf("226 Transfer complete\n");
-        send_response(client_fd, "226 Transfer complete.");
+        send_response(client_fd, "226 Transfer complete."); // Notify client
     }
-}
-
-/**
- * MKD (Make Directory) Command Handler
- * 
- * This function implements the FTP MKD command which creates a new directory
- * in the client's current working directory. The implementation:
- * 
- * 1. Verifies the user's session is valid
- * 2. Constructs the full path for the new directory
- * 3. Checks if the directory already exists to prevent overwriting
- * 4. Creates the directory with full permissions (0777)
- * 5. Returns appropriate success or error messages
- * 
- * The 0777 permission is used to give full access initially, assuming that the server's
- * umask will restrict these permissions as appropriate for the system. In a production
- * environment, more restrictive permissions might be appropriate based on security requirements.
- * 
- * The function follows the FTP protocol response format (257) for successful directory creation.
- */
-void handle_mkd_command(int client_fd, char *dirname) {
-    int session_index = get_session_index(client_fd);
-    
-    if (session_index == -1) {
-        send_response(client_fd, "500 Internal server error.");
-        return;
-    }
-    
-    // Create full path for the directory
-    char dir_path[BUFFER_SIZE];
-    sprintf(dir_path, "%s/%s", client_sessions[session_index].current_dir, dirname);
-    
-    // Check if directory already exists
-    DIR *dir = opendir(dir_path);
-    if (dir != NULL) {
-        closedir(dir);
-        send_response(client_fd, "550 Directory already exists.");
-        return;
-    }
-    
-    // Create directory
-    if (mkdir(dir_path, 0777) == 0) {
-        char response[BUFFER_SIZE];
-        sprintf(response, "257 \"%s\" directory created.", dirname);
-        send_response(client_fd, response);
-    } else {
-        send_response(client_fd, "550 Failed to create directory.");
-    }
-}
-
-/**
- * RMD (Remove Directory) Command Handler
- * 
- * This function implements the FTP RMD command which removes an existing directory.
- * The implementation includes these key features:
- * 
- * 1. Constructs the full path for the target directory
- * 2. Verifies the directory exists before attempting removal
- * 3. Uses rmdir() which will fail if the directory is not empty, providing a safety mechanism
- *    against accidental deletion of non-empty directories
- * 4. Returns appropriate success or error messages
- * 
- * The error message specifically mentions that directories must be empty, which guides users
- * on how to properly remove directories with content (they must delete files first).
- * 
- * This implementation follows the principle of least surprise by preventing unintended
- * recursive directory deletion, which could be catastrophic in an FTP server context.
- */
-void handle_rmd_command(int client_fd, char *dirname) {
-    int session_index = get_session_index(client_fd);
-    
-    if (session_index == -1) {
-        send_response(client_fd, "500 Internal server error.");
-        return;
-    }
-    
-    // Create full path for the directory
-    char dir_path[BUFFER_SIZE];
-    sprintf(dir_path, "%s/%s", client_sessions[session_index].current_dir, dirname);
-    
-    // Check if directory exists
-    DIR *dir = opendir(dir_path);
-    if (dir == NULL) {
-        send_response(client_fd, "550 Directory not found.");
-        return;
-    }
-    closedir(dir);
-    
-    // Remove directory
-    if (rmdir(dir_path) == 0) {
-        char response[BUFFER_SIZE];
-        sprintf(response, "250 \"%s\" directory removed.", dirname);
-        send_response(client_fd, response);
-    } else {
-        send_response(client_fd, "550 Failed to remove directory. Make sure it is empty.");
-    }
-}
-
-/**
- * DELE (Delete File) Command Handler
- * 
- * This function implements the FTP DELE command which deletes a file from the server.
- * The implementation includes:
- * 
- * 1. Constructing the full path for the target file
- * 2. Checking if the file exists and is accessible before attempting deletion
- * 3. Using unlink() system call to delete the file
- * 4. Providing appropriate success or error responses
- * 
- * Note that this function only handles file deletion, not directory removal (which is handled by RMD).
- * The function first validates the file exists by attempting to open it for reading, which
- * ensures the user has appropriate access permissions before proceeding with deletion.
- * 
- * This implementation follows the FTP standard response codes, using 250 for successful deletion
- * and 550 for failure.
- */
-void handle_dele_command(int client_fd, char *filename) {
-    int session_index = get_session_index(client_fd);
-    
-    if (session_index == -1) {
-        send_response(client_fd, "500 Internal server error.");
-        return;
-    }
-    
-    // Create full path for the file
-    char file_path[BUFFER_SIZE];
-    sprintf(file_path, "%s/%s", client_sessions[session_index].current_dir, filename);
-    
-    // Check if file exists
-    FILE *fp = fopen(file_path, "r");
-    if (fp == NULL) {
-        send_response(client_fd, "550 File not found.");
-        return;
-    }
-    fclose(fp);
-    
-    // Delete file
-    if (unlink(file_path) == 0) {
-        char response[BUFFER_SIZE];
-        sprintf(response, "250 \"%s\" file deleted.", filename);
-        send_response(client_fd, response);
-    } else {
-        send_response(client_fd, "550 Failed to delete file.");
-    }
-}
-
-/**
- * Global Variable for File Renaming
- * 
- * This array stores the old filenames for each client session during the rename operation.
- * It's used as temporary storage between the RNFR (rename from) and RNTO (rename to) commands.
- * 
- * Since the FTP rename operation is a two-step process requiring two separate commands,
- * this global variable maintains state between these commands. The array is indexed by
- * the session index, allowing multiple concurrent users to perform rename operations without
- * interference.
- */
-// Global variable to store old filename for RNFR/RNTO commands
-char rnfr_filename[MAX_CLIENTS][BUFFER_SIZE];
-
-/**
- * RNFR (Rename From) Command Handler
- * 
- * This function implements the first step of the FTP file rename operation.
- * Key features include:
- * 
- * 1. Verifying the file exists using stat() rather than attempting to open it,
- *    which allows for renaming both files and directories
- * 2. Storing the full absolute path of the source file in the rnfr_filename array
- * 3. Responding with the standard 350 code indicating that additional information is required
- * 
- * This command must be followed by the RNTO command to complete the rename operation.
- * The FTP protocol splits renaming into two commands to allow verification at each step
- * and to maintain statelessness in the command structure while still performing what is
- * logically a single operation.
- */
-
- void handle_rnfr_command(int client_fd, char *oldname) {
-    int session_index = get_session_index(client_fd);
-    
-    if (session_index == -1) {
-        send_response(client_fd, "500 Internal server error.");
-        return;
-    }
-    
-    // Create full path for the file
-    char file_path[BUFFER_SIZE];
-    sprintf(file_path, "%s/%s", client_sessions[session_index].current_dir, oldname);
-    
-    // Check if file exists
-    struct stat file_stat;
-    if (stat(file_path, &file_stat) == -1) {
-        send_response(client_fd, "550 File not found.");
-        return;
-    }
-    
-    // Store old filename for RNTO command
-    sprintf(rnfr_filename[session_index], "%s", file_path);
-    
-    send_response(client_fd, "350 Requested file action pending further information.");
-}
-
-void handle_rnto_command(int client_fd, char *newname) {
-    int session_index = get_session_index(client_fd);
-    
-    if (session_index == -1) {
-        send_response(client_fd, "500 Internal server error.");
-        return;
-    }
-    
-    // Check if RNFR command was sent
-    if (rnfr_filename[session_index][0] == '\0') {
-        send_response(client_fd, "503 Bad sequence of commands.");
-        return;
-    }
-    
-    // Create full path for the new file
-    char new_file_path[BUFFER_SIZE];
-    sprintf(new_file_path, "%s/%s", client_sessions[session_index].current_dir, newname);
-    
-    // Rename file
-    if (rename(rnfr_filename[session_index], new_file_path) == 0) {
-        char response[BUFFER_SIZE];
-        sprintf(response, "250 File successfully renamed.");
-        send_response(client_fd, response);
-    } else {
-        send_response(client_fd, "550 Failed to rename file.");
-    }
-    
-    // Clear stored filename
-    memset(rnfr_filename[session_index], 0, BUFFER_SIZE);
 }
